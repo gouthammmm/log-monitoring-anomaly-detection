@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Log Anomaly Detector</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.3/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.30.1/moment.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-moment/1.0.1/chartjs-adapter-moment.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #262b36;
+    --text: #e6e8ec; --muted: #8b93a3;
+    --error: #ef4444; --warn: #f59e0b; --ok: #22c55e; --accent: #6366f1;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: 'Inter', system-ui, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  header {
+    padding: 20px 28px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 700; }
+  header .status { font-size: 13px; color: var(--muted); }
+  main { padding: 24px 28px; display: grid; gap: 20px; grid-template-columns: 1fr; }
+  .row { display: grid; gap: 20px; grid-template-columns: 2fr 1fr; }
+  @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px;
+  }
+  .panel h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; font-size: 13px;
+  }
+  .controls { display: flex; gap: 10px; margin-bottom: 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  .sev-ERROR { color: var(--error); font-weight: 600; }
+  .sev-WARN { color: var(--warn); }
+  .sev-INFO { color: var(--muted); }
+  .anomaly-card {
+    border: 1px solid var(--border); border-left: 3px solid var(--error);
+    border-radius: 8px; padding: 12px; margin-bottom: 10px; background: #1c1f28;
+  }
+  .anomaly-card .meta { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .anomaly-card .summary { font-size: 13px; margin-bottom: 6px; }
+  .anomaly-card .steps { font-size: 12px; color: #c7cbd4; white-space: pre-line; }
+  .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+  .scroll { max-height: 480px; overflow-y: auto; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Log Anomaly Detector</h1>
+  <span class="status" id="status">connecting…</span>
+</header>
+
+<main>
+  <div class="panel">
+    <h2>Error Rate by Service</h2>
+    <div class="controls">
+      <select id="rangeSelect">
+        <option value="15">Last 15 min</option>
+        <option value="30" selected>Last 30 min</option>
+        <option value="60">Last 60 min</option>
+      </select>
+    </div>
+    <canvas id="errorRateChart" height="90"></canvas>
+  </div>
+
+  <div class="row">
+    <div class="panel">
+      <h2>Recent Logs</h2>
+      <div class="controls">
+        <select id="serviceFilter"><option value="">All services</option></select>
+        <select id="severityFilter">
+          <option value="">All severities</option>
+          <option value="ERROR">ERROR</option>
+          <option value="WARN">WARN</option>
+          <option value="INFO">INFO</option>
+        </select>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Time</th><th>Service</th><th>Severity</th><th>Message</th><th>Latency</th></tr></thead>
+          <tbody id="logsBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Detected Anomalies</h2>
+      <div class="scroll" id="anomaliesList">
+        <div class="empty">No anomalies yet.</div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+const API = ""; // same origin as the dashboard (served by api-gateway)
+let chart;
+
+function escapeHTML(value) {
+  return String(value ?? "").replace(/[&<>"']/g, char => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[char]);
+}
+
+async function fetchJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(res.statusText);
+  return res.json();
+}
+
+async function refreshHealth() {
+  try {
+    await fetchJSON(`${API}/api/health`);
+    document.getElementById("status").textContent = "connected";
+  } catch {
+    document.getElementById("status").textContent = "disconnected";
+  }
+}
+
+async function refreshChart() {
+  const minutes = document.getElementById("rangeSelect").value;
+  const data = await fetchJSON(`${API}/api/logs/error-rate-timeseries?minutes=${minutes}`);
+
+  const byService = {};
+  data.forEach(r => {
+    byService[r.service] ??= [];
+    byService[r.service].push({ x: r.bucket, y: +(r.error_rate * 100).toFixed(1) });
+  });
+
+  const colors = ["#6366f1", "#22c55e", "#f59e0b", "#ef4444", "#06b6d4"];
+  const datasets = Object.entries(byService).map(([service, points], i) => ({
+    label: service,
+    data: points,
+    borderColor: colors[i % colors.length],
+    backgroundColor: "transparent",
+    tension: 0.3,
+    pointRadius: 0,
+  }));
+
+  const ctx = document.getElementById("errorRateChart");
+  if (chart) {
+    chart.data.datasets = datasets;
+    chart.update();
+  } else {
+    chart = new Chart(ctx, {
+      type: "line",
+      data: { datasets },
+      options: {
+        parsing: false,
+        scales: {
+          x: { type: "time", time: { unit: "minute" }, ticks: { color: "#8b93a3" }, grid: { color: "#262b36" } },
+          y: { title: { display: true, text: "Error rate %", color: "#8b93a3" }, ticks: { color: "#8b93a3" }, grid: { color: "#262b36" } },
+        },
+        plugins: { legend: { labels: { color: "#e6e8ec" } } },
+      },
+    });
+  }
+}
+
+async function refreshLogs() {
+  const service = document.getElementById("serviceFilter").value;
+  const severity = document.getElementById("severityFilter").value;
+  const params = new URLSearchParams({ minutes: "30", limit: "100" });
+  if (service) params.set("service", service);
+  if (severity) params.set("severity", severity);
+
+  const logs = await fetchJSON(`${API}/api/logs?${params}`);
+  const tbody = document.getElementById("logsBody");
+  tbody.innerHTML = logs.map(l => `
+    <tr>
+      <td>${escapeHTML(new Date(l.ts).toLocaleTimeString())}</td>
+      <td>${escapeHTML(l.service)}</td>
+      <td class="sev-${escapeHTML(l.severity)}">${escapeHTML(l.severity)}</td>
+      <td>${escapeHTML(l.message)}</td>
+      <td>${escapeHTML(Number(l.latency_ms).toFixed(0))}ms</td>
+    </tr>
+  `).join("");
+
+  const serviceSelect = document.getElementById("serviceFilter");
+  const known = new Set([...serviceSelect.options].map(o => o.value));
+  [...new Set(logs.map(l => l.service))].forEach(s => {
+    if (!known.has(s)) {
+      const opt = document.createElement("option");
+      opt.value = s; opt.textContent = s;
+      serviceSelect.appendChild(opt);
+    }
+  });
+}
+
+async function refreshAnomalies() {
+  const anomalies = await fetchJSON(`${API}/api/anomalies?minutes=1440&limit=25`);
+  const list = document.getElementById("anomaliesList");
+  if (!anomalies.length) {
+    list.innerHTML = `<div class="empty">No anomalies yet.</div>`;
+    return;
+  }
+  list.innerHTML = anomalies.map(a => `
+    <div class="anomaly-card">
+      <div class="meta">${escapeHTML(new Date(a.detected_at).toLocaleString())} · ${escapeHTML(a.service)} · ${escapeHTML(a.metric)}=${escapeHTML((Number(a.value)*100).toFixed(0))}% (threshold ${escapeHTML((Number(a.threshold)*100).toFixed(0))}%)</div>
+      <div class="summary">${escapeHTML(a.summary || "(summary pending…)")}</div>
+      <div class="steps">${escapeHTML(a.suggested_steps || "")}</div>
+    </div>
+  `).join("");
+}
+
+async function refreshAll() {
+  await Promise.allSettled([refreshHealth(), refreshChart(), refreshLogs(), refreshAnomalies()]);
+}
+
+document.getElementById("rangeSelect").addEventListener("change", refreshChart);
+document.getElementById("serviceFilter").addEventListener("change", refreshLogs);
+document.getElementById("severityFilter").addEventListener("change", refreshLogs);
+
+refreshAll();
+setInterval(refreshAll, 5000);
+</script>
+</body>
+</html>

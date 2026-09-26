@@ -1,0 +1,133 @@
+services:
+  # ---------------------------------------------------------------------
+  # Kafka (KRaft mode -> no Zookeeper needed)
+  # ---------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:4.1.2
+    container_name: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT_HOST://localhost:9092,PLAINTEXT://kafka:19092"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:29093"
+      KAFKA_LISTENERS: "CONTROLLER://:29093,PLAINTEXT_HOST://:9092,PLAINTEXT://:19092"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_LOG_DIRS: "/tmp/kraft-combined-logs"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # ---------------------------------------------------------------------
+  # ClickHouse (log/analytics storage)
+  # ---------------------------------------------------------------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: clickhouse
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-log-anomaly-local}
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./infra/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------
+  # Producer(s) - simulate applications emitting logs
+  # ---------------------------------------------------------------------
+  producer:
+    build: ./producer
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:19092
+      - LOGS_PER_SECOND=5
+    deploy:
+      replicas: 2   # multiple producers -> distributed ingestion
+
+  # ---------------------------------------------------------------------
+  # Ingestion consumer(s) - raw-logs -> ClickHouse
+  # ---------------------------------------------------------------------
+  ingestion-consumer:
+    build: ./ingestion-consumer
+    depends_on:
+      kafka:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:19092
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-log-anomaly-local}
+    deploy:
+      replicas: 2   # consumer group -> partitioned, parallel writes
+
+  # ---------------------------------------------------------------------
+  # Detection service - raw-logs -> anomalies
+  # ---------------------------------------------------------------------
+  detection-service:
+    build: ./detection-service
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:19092
+      - WINDOW_SECONDS=30
+      - ERROR_RATE_THRESHOLD=0.4
+      - MIN_EVENTS_IN_WINDOW=10
+
+  # ---------------------------------------------------------------------
+  # AI summary service - anomalies -> LLM summary -> ClickHouse
+  # ---------------------------------------------------------------------
+  ai-summary-service:
+    build: ./ai-summary-service
+    depends_on:
+      kafka:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    environment:
+      - KAFKA_BOOTSTRAP=kafka:19092
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-log-anomaly-local}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+  # ---------------------------------------------------------------------
+  # API gateway + dashboard
+  # ---------------------------------------------------------------------
+  api-gateway:
+    build:
+      context: .
+      dockerfile: api-gateway/Dockerfile
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      - CLICKHOUSE_HOST=clickhouse
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-log-anomaly-local}
+    ports:
+      - "8000:8000"
+
+volumes:
+  clickhouse_data:
