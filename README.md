@@ -4,6 +4,10 @@ A local, containerized demo that generates application-style logs, detects high 
 
 **This demo uses simulated logs. It does not collect logs from your computer or other applications.**
 
+## Screenshot
+
+![Log Anomaly Detector dashboard with simulated logs and detected alerts](screenshots/log-monitoring-dashboard.png)
+
 ## How it works
 
 ```text
