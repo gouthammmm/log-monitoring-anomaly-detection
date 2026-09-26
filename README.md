@@ -1,4 +1,4 @@
-# Log Anomaly Detector
+# Log Monitoring & Anomaly Detection
 
 A local, containerized demo that generates application-style logs, detects high error rates, and displays logs and alerts in a browser dashboard.
 
@@ -30,7 +30,7 @@ Requirements: Docker Desktop with the WSL 2 backend on Windows, or Docker Engine
 In PowerShell, run:
 
 ```powershell
-cd "C:\path\to\log-anomaly-platform"
+cd "C:\path\to\log-monitoring-anomaly-detection"
 Copy-Item .env.example .env
 docker compose up --build
 ```

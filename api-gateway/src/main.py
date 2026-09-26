@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 
 from src.routes import logs, anomalies
 
-app = FastAPI(title="Log Anomaly Detector API")
+app = FastAPI(title="Log Monitoring & Anomaly Detection API")
 
 app.add_middleware(
     CORSMiddleware,
